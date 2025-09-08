@@ -4,13 +4,13 @@ pub mod link;
 pub mod object;
 pub mod telegram;
 
-use infra::executor::telegram_message::{escape, MessageBuilder, TelegramMessageDispatcher};
+use crate::infra::executor::telegram_message::{escape, MessageBuilder, TelegramMessageDispatcher};
 use ethers::{providers::{Http, Provider}, types::U256};
 use tokio::runtime::{Builder, Handle, RuntimeFlavor};
 use tracing::error;
 use std::sync::Arc;
 
-use crate::telegram::*;
+use telegram::*;
 
 pub fn set_panic_hook() {
     std::panic::set_hook(Box::new(move |info| {

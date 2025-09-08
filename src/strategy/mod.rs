@@ -1,3 +1,4 @@
+pub mod arb;
 mod arb_cache;
 mod worker;
 
@@ -25,10 +26,11 @@ use tracing::{debug, error, info, instrument, warn};
 use worker::Worker;
 
 use crate::{
-    arb::Arb,
     common::get_latest_block,
     types::{Action, Event, Source},
 };
+
+use arb::Arb;
 
 pub struct ArbStrategy {
     sender: Address,
@@ -92,6 +94,73 @@ impl ArbStrategy {
         Ok(())
     }
 
+    #[instrument(name = "on-new-pending-tx", skip_all, fields(tx = %tx.hash))]
+    async fn on_new_pending_tx(&mut self, tx: ethers::types::Transaction) -> Result<()> {
+        // 分析pending交易，寻找DEX交易
+        info!("Processing pending tx: {}", tx.hash);
+        
+        // 检查交易是否与已知的DEX合约交互
+        if let Some(to_address) = tx.to {
+            // 这里应该检查to_address是否是已知的DEX路由器地址
+            // 对于AVAX链，主要检查TraderJoe、Pangolin、Sushiswap等
+            if self.is_dex_router_address(to_address) {
+                info!("Found DEX transaction to: {}", to_address);
+                
+                // 解析交易数据，提取涉及的代币信息
+                if let Ok(swap_info) = self.parse_dex_transaction_data(&tx).await {
+                    info!("Extracted swap info: token={}, amount={}", swap_info.token, swap_info.amount);
+                    
+                    let block_number = self.get_latest_block().await?;
+                    let sim_ctx = SimulateCtx::new(block_number, vec![]);
+                    
+                    // 将套利机会添加到缓存
+                    self.arb_cache.insert(
+                        swap_info.token,
+                        Some(swap_info.pool_address),
+                        tx.hash,
+                        sim_ctx,
+                        Source::Mempool,
+                    );
+                    
+                    info!("Added arbitrage opportunity from pending tx to cache");
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn is_dex_router_address(&self, address: Address) -> bool {
+        // AVAX链上的主要DEX路由器地址
+        let known_dex_routers = vec![
+            "0x60aE616a2155Ee3d9A68541Ba4544862310933d4", // TraderJoe Router
+            "0xE54Ca86531e17Ef3616d22Ca28b0D458b6C89106", // Pangolin Router  
+            "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506", // SushiSwap Router
+        ];
+        
+        known_dex_routers.iter().any(|&router| {
+            Address::from_str(router).unwrap_or_default() == address
+        })
+    }
+
+    async fn parse_dex_transaction_data(&self, tx: &ethers::types::Transaction) -> Result<SwapInfo> {
+        // 简化版本：从交易数据中提取代币信息
+        // 实际实现需要解析具体的函数调用数据
+        
+        // 这里返回一个示例，实际应该解析tx.input数据
+        let token = if let Some(to) = tx.to {
+            format!("0x{:x}", to) // 简化处理
+        } else {
+            "0xA7D7079b0FEaD91F3e65f86E8915Cb59c1a4C664".to_string() // USDC.e as fallback
+        };
+        
+        Ok(SwapInfo {
+            token,
+            amount: tx.value.as_u64(),
+            pool_address: tx.to.unwrap_or_default(),
+        })
+    }
+
     async fn parse_involved_token_pools(&self, logs: Vec<Log>) -> HashSet<(String, Option<Address>)> {
         let mut join_set = JoinSet::new();
 
@@ -153,6 +222,13 @@ pub struct SwapEvent {
     pub tokens_out: Vec<String>,
     pub amounts_in: Vec<u64>,
     pub amounts_out: Vec<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SwapInfo {
+    pub token: String,
+    pub amount: u64,
+    pub pool_address: Address,
 }
 
 impl SwapEvent {
@@ -266,8 +342,7 @@ impl burberry::Strategy<Event, Action> for ArbStrategy {
     async fn process_event(&mut self, event: Event, _submitter: Arc<dyn ActionSubmitter<Action>>) {
         let result = match event {
             Event::PublicTx(tx_receipt, logs) => self.on_new_tx_receipt(tx_receipt, logs).await,
-            // Remove Shio events as they are Sui-specific
-            _ => Ok(()),
+            Event::PendingTx(tx) => self.on_new_pending_tx(tx).await,
         };
         if let Err(error) = result {
             error!(?error, "failed to process event");

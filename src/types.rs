@@ -1,7 +1,7 @@
 use std::fmt;
 use ethers::types::{TransactionRequest, TransactionReceipt, Log, H256};
 use serde::{Deserialize, Serialize};
-use infra::executor::telegram_message::Message;
+use crate::engine::executor::telegram_message::Message;
 
 #[derive(Debug, Clone)]
 pub enum Action {
@@ -25,7 +25,7 @@ impl From<TransactionRequest> for Action {
 #[derive(Clone, Debug)]
 pub enum Event {
     PublicTx(TransactionReceipt, Vec<Log>),
-    PendingTx(TransactionRequest),
+    PendingTx(ethers::types::Transaction),
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]

@@ -1,4 +1,4 @@
-use infra::{async_trait, Collector, CollectorStream};
+use crate::engine::{async_trait, Collector, CollectorStream};
 use eyre::Result;
 use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
