@@ -1,4 +1,7 @@
 pub mod arb;
+pub mod contract_arb;
+pub mod transaction_analyzer;
+pub mod arbitrage_analyzer;
 mod arb_cache;
 mod worker;
 

@@ -1,10 +1,8 @@
-mod curve;
 mod indexer_searcher;
 mod pangolin;
 mod sushi_swap;
 mod trade;
 mod trader_joe;
-mod uniswap_v3;
 mod utils;
 
 use std::{
@@ -28,11 +26,10 @@ pub use trade::{Path, TradeCtx, TradeType, Trader};
 
 use crate::{config::pegged_coin_types, types::Source};
 
-const MAX_HOP_COUNT: usize = 2;
 const MAX_POOL_COUNT: usize = 10;
 const MIN_LIQUIDITY: u128 = 1000;
 
-// WAVAX address - the native token for most swaps
+// WAVAX address - commonly used native token
 pub const WAVAX_ADDRESS: &str = "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7";
 
 #[async_trait::async_trait]
@@ -154,6 +151,10 @@ impl Defi {
     }
 
     pub async fn find_sell_paths(&self, token_in_address: &str) -> Result<Vec<Path>> {
+        self.find_sell_paths_with_hops(token_in_address, 2).await
+    }
+
+    pub async fn find_sell_paths_with_hops(&self, token_in_address: &str, max_hops: usize) -> Result<Vec<Path>> {
         if coin::is_native_coin(token_in_address) {
             return Ok(vec![Path::default()]);
         }
@@ -163,8 +164,8 @@ impl Defi {
         let mut visited = HashSet::new();
         let mut visited_dexes = HashSet::new();
 
-        for nth_hop in 0..MAX_HOP_COUNT {
-            let is_last_hop = nth_hop == MAX_HOP_COUNT - 1;
+        for nth_hop in 0..max_hops {
+            let is_last_hop = nth_hop == max_hops - 1;
             let mut new_stack = vec![];
 
             while let Some(token_address) = stack.pop() {
@@ -173,11 +174,20 @@ impl Defi {
                 }
                 visited.insert(token_address.clone());
 
-                let token_out_address = if pegged_coin_types().contains(token_address.as_str()) || is_last_hop {
+                // For the last hop, try to find paths back to the original token or common intermediary tokens
+                let token_out_address = if is_last_hop {
+                    // Try to find paths back to the original token first, then WAVAX, then pegged coins
+                    if token_address != token_in_address {
+                        Some(token_in_address.to_string())
+                    } else {
+                        Some(WAVAX_ADDRESS.to_string())
+                    }
+                } else if pegged_coin_types().contains(token_address.as_str()) {
                     Some(WAVAX_ADDRESS.to_string())
                 } else {
                     None
                 };
+
                 let mut dexes = if let Ok(dexes) = self.dex_searcher.find_dexes(&token_address, token_out_address).await {
                     dexes
                 } else {
@@ -214,7 +224,7 @@ impl Defi {
         }
 
         let mut routes = vec![];
-        dfs(token_in_address, &mut vec![], &all_hops, &mut routes);
+        dfs_with_target(token_in_address, token_in_address, &mut vec![], &all_hops, &mut routes, max_hops);
 
         Ok(routes.into_iter().map(Path::new).collect())
     }
@@ -302,6 +312,46 @@ impl Defi {
     }
 }
 
+fn dfs_with_target(
+    current_token: &str,
+    target_token: &str,
+    path: &mut Vec<Box<dyn Dex>>,
+    hops: &HashMap<String, Vec<Box<dyn Dex>>>,
+    routes: &mut Vec<Vec<Box<dyn Dex>>>,
+    max_hops: usize,
+) {
+    // If we've reached the target token and have a non-empty path, we found a valid route
+    if current_token == target_token && !path.is_empty() {
+        routes.push(path.clone());
+        return;
+    }
+    
+    // If we've reached the maximum hop count, stop exploring
+    if path.len() >= max_hops {
+        return;
+    }
+    
+    // If no hops available from current token, stop exploring
+    if !hops.contains_key(current_token) {
+        return;
+    }
+    
+    // Explore all possible next hops
+    for dex in hops.get(current_token).unwrap() {
+        let next_token = dex.coin_out_type();
+        
+        // Avoid revisiting the same pool in the path to prevent loops
+        if path.iter().any(|existing_dex| existing_dex.pool_address() == dex.pool_address()) {
+            continue;
+        }
+        
+        path.push(dex.clone());
+        dfs_with_target(&next_token, target_token, path, hops, routes, max_hops);
+        path.pop();
+    }
+}
+
+// Legacy function for compatibility
 fn dfs(
     token_address: &str,
     path: &mut Vec<Box<dyn Dex>>,
@@ -312,7 +362,7 @@ fn dfs(
         routes.push(path.clone());
         return;
     }
-    if path.len() >= MAX_HOP_COUNT {
+    if path.len() >= 2 { // Default to 2 hops for legacy compatibility
         return;
     }
     if !hops.contains_key(token_address) {
@@ -346,14 +396,14 @@ impl PathTradeResult {
     }
 
     pub fn profit(&self) -> i128 {
-        if self.path.coin_in_type() == WAVAX_ADDRESS {
-            if self.path.coin_out_type() == WAVAX_ADDRESS {
-                return self.amount_out as i128 - self.amount_in as i128 - self.gas_cost as i128;
-            }
-            0 - self.gas_cost as i128 - self.amount_in as i128
-        } else {
-            0
+        // Support circular arbitrage: if input and output tokens are the same, calculate profit
+        if self.path.coin_in_type() == self.path.coin_out_type() {
+            return self.amount_out as i128 - self.amount_in as i128 - self.gas_cost as i128;
         }
+        
+        // For non-circular paths, we can't easily calculate profit without knowing token values
+        // Return negative gas cost to indicate this is not a profitable complete arbitrage
+        -(self.gas_cost as i128)
     }
 }
 

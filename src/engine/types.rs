@@ -1,55 +1,52 @@
-use std::{pin::Pin, sync::Arc};
-
+use anyhow::Result;
 use async_trait::async_trait;
-use eyre::Result;
-use futures::{Stream, StreamExt};
+use ethers::types::Transaction;
+use std::pin::Pin;
+use tokio_stream::Stream;
+use tokio_stream::StreamExt;
 
+use crate::collectors::block_collector::NewBlock;
+use crate::collectors::opensea_order_collector::OpenseaOrder;
+use crate::executors::flashbots_executor::FlashbotsBundle;
+use crate::executors::mempool_executor::SubmitTxToMempool;
+
+/// A stream of events emitted by a [Collector](Collector).
 pub type CollectorStream<'a, E> = Pin<Box<dyn Stream<Item = E> + Send + 'a>>;
 
+/// Collector trait, which defines a source of events.
 #[async_trait]
 pub trait Collector<E>: Send + Sync {
-    fn name(&self) -> &str {
-        "Unnamed"
-    }
-
+    /// Returns the core event stream for the collector.
     async fn get_event_stream(&self) -> Result<CollectorStream<'_, E>>;
 }
 
-pub trait ActionSubmitter<A>: Send + Sync
-where
-    A: Send + Sync + Clone + 'static,
-{
-    fn submit(&self, action: A);
-}
-
+/// Strategy trait, which defines the core logic for each opportunity.
 #[async_trait]
-pub trait Strategy<E, A>: Send + Sync
-where
-    E: Send + Sync + Clone + 'static,
-    A: Send + Sync + Clone + 'static,
-{
-    fn name(&self) -> &str {
-        "Unnamed"
-    }
+pub trait Strategy<E, A>: Send + Sync {
+    /// Sync the initial state of the strategy if needed, usually by fetching
+    /// onchain data.
+    async fn sync_state(&mut self) -> Result<()>;
 
-    async fn sync_state(&mut self, _submitter: Arc<dyn ActionSubmitter<A>>) -> Result<()> {
-        Ok(())
-    }
-
-    async fn process_event(&mut self, event: E, submitter: Arc<dyn ActionSubmitter<A>>);
+    /// Process an event, and return an action if needed.
+    async fn process_event(&mut self, event: E) -> Vec<A>;
 }
 
+/// Executor trait, responsible for executing actions returned by strategies.
+#[async_trait]
+pub trait Executor<A>: Send + Sync {
+    /// Execute an action.
+    async fn execute(&self, action: A) -> Result<()>;
+}
+
+/// CollectorMap is a wrapper around a [Collector](Collector) that maps outgoing
+/// events to a different type.
 pub struct CollectorMap<E, F> {
-    inner: Box<dyn Collector<E>>,
+    collector: Box<dyn Collector<E>>,
     f: F,
 }
-
 impl<E, F> CollectorMap<E, F> {
     pub fn new(collector: Box<dyn Collector<E>>, f: F) -> Self {
-        Self {
-            inner: collector,
-            f,
-        }
+        Self { collector, f }
     }
 }
 
@@ -60,68 +57,24 @@ where
     E2: Send + Sync + 'static,
     F: Fn(E1) -> E2 + Send + Sync + Clone + 'static,
 {
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
-
     async fn get_event_stream(&self) -> Result<CollectorStream<'_, E2>> {
-        let stream = self.inner.get_event_stream().await?;
+        let stream = self.collector.get_event_stream().await?;
         let f = self.f.clone();
         let stream = stream.map(f);
         Ok(Box::pin(stream))
     }
 }
 
-pub struct CollectorFilterMap<E, F> {
-    inner: Box<dyn Collector<E>>,
-    f: F,
-}
-
-impl<E, F> CollectorFilterMap<E, F> {
-    pub fn new(collector: Box<dyn Collector<E>>, f: F) -> Self {
-        Self {
-            inner: collector,
-            f,
-        }
-    }
-}
-
-#[async_trait]
-impl<E1, E2, F> Collector<E2> for CollectorFilterMap<E1, F>
-where
-    E1: Send + Sync + 'static,
-    E2: Send + Sync + 'static,
-    F: Fn(E1) -> Option<E2> + Send + Sync + Clone + Copy + 'static,
-{
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
-
-    async fn get_event_stream(&self) -> Result<CollectorStream<'_, E2>> {
-        let stream = self.inner.get_event_stream().await?;
-        let f = self.f;
-        let stream = stream.filter_map(move |v| async move { f(v) });
-        Ok(Box::pin(stream))
-    }
-}
-
-#[async_trait]
-pub trait Executor<A>: Send + Sync {
-    fn name(&self) -> &str {
-        "Unnamed"
-    }
-
-    async fn execute(&self, action: A) -> Result<()>;
-}
-
+/// ExecutorMap is a wrapper around an [Executor](Executor) that maps incoming
+/// actions to a different type.
 pub struct ExecutorMap<A, F> {
-    inner: Box<dyn Executor<A>>,
+    executor: Box<dyn Executor<A>>,
     f: F,
 }
 
 impl<A, F> ExecutorMap<A, F> {
     pub fn new(executor: Box<dyn Executor<A>>, f: F) -> Self {
-        Self { inner: executor, f }
+        Self { executor, f }
     }
 }
 
@@ -132,15 +85,24 @@ where
     A2: Send + Sync + 'static,
     F: Fn(A1) -> Option<A2> + Send + Sync + Clone + 'static,
 {
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
-
     async fn execute(&self, action: A1) -> Result<()> {
         let action = (self.f)(action);
         match action {
-            Some(action) => self.inner.execute(action).await,
+            Some(action) => self.executor.execute(action).await,
             None => Ok(()),
         }
     }
+}
+
+/// Convenience enum containing all the events that can be emitted by collectors.
+pub enum Events {
+    NewBlock(NewBlock),
+    Transaction(Transaction),
+    OpenseaOrder(Box<OpenseaOrder>),
+}
+
+/// Convenience enum containing all the actions that can be executed by executors.
+pub enum Actions {
+    FlashbotsBundle(FlashbotsBundle),
+    SubmitTxToMempool(SubmitTxToMempool),
 }

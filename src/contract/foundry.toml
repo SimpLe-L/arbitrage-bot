@@ -1,0 +1,32 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+solc = "0.8.30"
+optimizer = true
+optimizer_runs = 1000000
+via_ir = true
+
+[rpc_endpoints]
+avalanche = "https://api.avax.network/ext/bc/C/rpc"
+fuji = "https://api.avax-test.network/ext/bc/C/rpc"
+
+[etherscan]
+avalanche = { key = "${ETHERSCAN_API_KEY}", url = "https://api.snowtrace.io/api" }
+fuji = { key = "${ETHERSCAN_API_KEY}", url = "https://api-testnet.snowtrace.io/api" }
+
+# Gas optimization
+[profile.default.optimizer_details]
+yul = true
+
+# Avalanche specific
+[profile.avalanche]
+src = "src" 
+out = "out"
+libs = ["lib"]
+solc = "0.8.30"
+optimizer = true
+optimizer_runs = 1000000
+via_ir = true
+gas_limit = 8000000
+gas_price = 25000000000  # 25 gwei base for AVAX

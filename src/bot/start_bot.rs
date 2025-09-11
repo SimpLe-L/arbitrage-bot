@@ -1,6 +1,6 @@
 use std::{
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use clap::Parser;
@@ -9,49 +9,48 @@ use object_pool::ObjectPool;
 use tracing::{info, warn};
 
 use crate::{
-    bot::{collector::AvaxMempoolCollector, executor::PublicTxExecutor},
+    bot::{collector::AvaxMempoolCollector, executor::EnhancedArbExecutor},
     simulator::{HttpSimulator, Simulator},
-    strategy::ArbStrategy,
+    strategy::{
+        ArbStrategy,
+        transaction_analyzer::TransactionAnalyzer,
+        arbitrage_analyzer::ArbitrageAnalyzer,
+    },
     types::{Action, Event},
     utils::heartbeat,
     HttpConfig,
 };
+
+use ethers::types::Address;
 
 #[derive(Clone, Debug, Parser)]
 pub struct Args {
     #[arg(long, env = "AVAX_PRIVATE_KEY")]
     pub private_key: String,
 
-    #[command(flatten)]
-    pub http_config: HttpConfig,
+    #[arg(long, env = "ARB_CONTRACT_ADDRESS")]
+    pub contract_address: Option<String>,
 
     #[command(flatten)]
-    collector_config: CollectorConfig,
+    pub http_config: HttpConfig,
 
     #[command(flatten)]
     worker_config: WorkerConfig,
 }
 
 #[derive(Clone, Debug, Parser)]
-struct CollectorConfig {
-    /// AVAX mempool websocket URL
-    #[arg(long, default_value = "wss://api.avax.network/ext/bc/C/ws")]
-    pub avax_ws_url: String,
-}
-
-#[derive(Clone, Debug, Parser)]
 struct WorkerConfig {
     /// Number of workers to process events
-    #[arg(long, default_value_t = 8)]
+    #[arg(long, env = "WORKER_THREADS", default_value_t = 8)]
     pub workers: usize,
 
     /// Number of simulator in simulator pool.
-    #[arg(long, default_value_t = 16)]
+    #[arg(long, env = "SIMULATOR_POOL_SIZE", default_value_t = 16)]
     pub num_simulators: usize,
 
     /// If a new coin comes in and it has been processed within the last `max_recent_arbs` times,
     /// it will be ignored.
-    #[arg(long, default_value_t = 20)]
+    #[arg(long, env = "MAX_RECENT_ARBS", default_value_t = 20)]
     pub max_recent_arbs: usize,
 }
 
@@ -102,34 +101,69 @@ pub async fn run(args: Args) -> Result<()> {
     .await;
 
     // 创建收集器
-    let mempool_collector = AvaxMempoolCollector::new(&args.collector_config.avax_ws_url);
+    let mempool_collector = AvaxMempoolCollector::new(&args.http_config.ws_url);
     
     // 创建执行器
-    let tx_executor = PublicTxExecutor::new(&rpc_url, &args.private_key).await?;
+    let contract_address = args.contract_address.as_deref().map(|s| s.parse()).transpose()?;
+    let tx_executor = EnhancedArbExecutor::new(&rpc_url, &args.private_key, contract_address).await?;
 
     info!("Starting mempool monitoring...");
 
     // 启动心跳
     heartbeat::start("avax-mev-bot", Duration::from_secs(30));
 
-    // 这里应该有一个简化的事件循环来处理mempool事件
-    // 由于用户要求不真正运行，我们只打印套利机会和路径
     info!("AVAX MEV Bot initialized successfully!");
-    info!("Bot would monitor mempool for arbitrage opportunities...");
-    info!("When profitable opportunities are found, it would:");
-    info!("1. Calculate optimal arbitrage paths");
-    info!("2. Simulate transactions locally");
-    info!("3. Print profit estimates and trading paths");
-    info!("4. (In real mode) Submit transactions to mempool");
+    info!("Starting event processing loop...");
 
-    // 模拟运行状态
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    info!("Demo: Found arbitrage opportunity!");
-    info!("Token: USDC.e (0xA7D7079b0FEaD91F3e65f86E8915Cb59c1a4C664)");
-    info!("Path: WAVAX -> TraderJoe -> USDC.e -> Pangolin -> WAVAX");
-    info!("Profit: 0.05 AVAX (~$2.50)");
-    info!("Gas Cost: 0.01 AVAX");
-    info!("Net Profit: 0.04 AVAX (~$2.00)");
+    // 创建分析器
+    let transaction_analyzer = TransactionAnalyzer::new();
+    let arbitrage_analyzer = ArbitrageAnalyzer::new();
+
+    // 创建事件处理循环
+    use crate::engine::Collector;
+    use futures::StreamExt;
+    
+    let mut event_stream = mempool_collector.get_event_stream().await?;
+    
+    info!("Monitoring mempool for arbitrage opportunities...");
+    
+    while let Some(event) = event_stream.next().await {
+        match event {
+            Event::PendingTx(tx) => {
+                // 使用交易分析器提取代币信息
+                if let Some(token_address) = transaction_analyzer.extract_token_from_tx(&tx) {
+                    info!("Processing pending tx: {:?}, token: {:?}", tx.hash, token_address);
+                    
+                    // 使用套利分析器寻找套利机会
+                    match arbitrage_analyzer.find_arbitrage_opportunity(
+                        &arb_strategy, 
+                        &token_address, 
+                        attacker,
+                        &rpc_url
+                    ).await {
+                        Ok(Some(opportunity)) => {
+                            // 使用新的详细显示方法
+                            opportunity.display();
+                            
+                            // 在实际部署中，这里会执行套利交易
+                            // tx_executor.execute(opportunity.tx_data).await?;
+                            info!("Arbitrage opportunity logged (execution disabled in demo mode)");
+                        },
+                        Ok(None) => {
+                            // 没有发现套利机会，这是正常的
+                        },
+                        Err(e) => {
+                            warn!("Error analyzing arbitrage opportunity: {}", e);
+                        }
+                    }
+                }
+            },
+            _ => {
+                // 处理其他类型的事件
+            }
+        }
+    }
 
     Ok(())
 }
+

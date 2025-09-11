@@ -38,9 +38,13 @@ pub struct Args {
 
     #[arg(
         long,
+        env = "WALLET_ADDRESS",
         default_value = "0x0000000000000000000000000000000000000000"
     )]
     pub sender: String,
+
+    #[arg(long, env = "MAX_HOPS", default_value = "2")]
+    pub max_hops: usize,
 
     #[command(flatten)]
     pub http_config: HttpConfig,
@@ -75,6 +79,7 @@ pub async fn run(args: Args) -> Result<()> {
             sim_ctx,
             true,
             Source::Public,
+            args.max_hops,
         )
         .await?;
 
@@ -113,6 +118,7 @@ impl Arb {
         sim_ctx: SimulateCtx,
         use_gss: bool,
         source: Source,
+        max_hops: usize,
     ) -> Result<ArbResult> {
         let gas_price = 25_000_000_000u64; // 25 gwei default for AVAX
 
@@ -126,6 +132,7 @@ impl Arb {
                     pool_address,
                     gas_limit,
                     sim_ctx,
+                    max_hops,
                 )
                 .await?,
             );
@@ -243,12 +250,15 @@ impl TrialCtx {
         pool_address: Option<Address>,
         gas_limit: u64,
         sim_ctx: SimulateCtx,
+        max_hops: usize,
     ) -> Result<Self> {
-        let buy_paths = defi.find_buy_paths(token_address).await?;
-        ensure!(!buy_paths.is_empty(), "no buy paths found for {}", token_address);
+        // For circular arbitrage, we just need paths that start and end with the same token
+        let arbitrage_paths = defi.find_sell_paths_with_hops(token_address, max_hops).await?;
+        ensure!(!arbitrage_paths.is_empty(), "no arbitrage paths found for {}", token_address);
 
-        let sell_paths = defi.find_sell_paths(token_address).await?;
-        ensure!(!sell_paths.is_empty(), "no sell paths found for {}", token_address);
+        // Use the same paths for both buy and sell since we're doing circular arbitrage
+        let buy_paths = arbitrage_paths.clone();
+        let sell_paths = arbitrage_paths;
 
         if pool_address.is_some() {
             let buy_paths_contain_pool = buy_paths.iter().any(|p| p.contains_pool(pool_address));
@@ -449,6 +459,7 @@ mod tests {
                 sim_ctx.clone(),
                 true,
                 Source::Public,
+                2, // default max_hops for test
             )
             .await
             .unwrap();

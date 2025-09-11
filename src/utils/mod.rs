@@ -3,6 +3,7 @@ pub mod heartbeat;
 pub mod link;
 pub mod object;
 pub mod telegram;
+pub mod token_config;
 
 use crate::infra::executor::telegram_message::{escape, MessageBuilder, TelegramMessageDispatcher};
 use ethers::{providers::{Http, Provider}, types::U256};
